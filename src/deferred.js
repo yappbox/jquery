@@ -1,3 +1,28 @@
+function promiseAWrapper( func, index ) {
+	return jQuery.isFunction( func ) && function() {
+		var returned;
+		try {
+			returned = func.apply( this, arguments );
+		} catch( e ) {
+			return jQuery.Deferred().rejectWith( this, [ e ] );
+		}
+		return ( index === 1 ) ? jQuery.when( returned ) : returned;
+	};
+}
+
+function attachToPromise( object, fnDone, fnFail, fnProgress ) {
+	if ( object ) {
+		if ( jQuery.isFunction( object.promise ) ) {
+			object = object.promise();
+			object.done( fnDone ).fail( fnFail ).progress( fnProgress );
+			return true;
+		} else if ( jQuery.isFunction( object.then ) ) {
+			object.then( fnDone, fnFail, fnProgress );
+			return true;
+		}
+	}
+}
+
 jQuery.extend({
 
 	Deferred: function( func ) {
@@ -16,30 +41,9 @@ jQuery.extend({
 					deferred.done( arguments ).fail( arguments );
 					return this;
 				},
+				pipe: pipe,
 				then: function( /* fnDone, fnFail, fnProgress */ ) {
-					var fns = arguments;
-					return jQuery.Deferred(function( newDefer ) {
-						jQuery.each( tuples, function( i, tuple ) {
-							var action = tuple[ 0 ],
-								fn = fns[ i ];
-							// deferred[ done | fail | progress ] for forwarding actions to newDefer
-							deferred[ tuple[1] ]( jQuery.isFunction( fn ) ?
-								function() {
-									var returned = fn.apply( this, arguments );
-									if ( returned && jQuery.isFunction( returned.promise ) ) {
-										returned.promise()
-											.done( newDefer.resolve )
-											.fail( newDefer.reject )
-											.progress( newDefer.notify );
-									} else {
-										newDefer[ action + "With" ]( this === deferred ? newDefer : this, [ returned ] );
-									}
-								} :
-								newDefer[ action ]
-							);
-						});
-						fns = null;
-					}).promise();
+					return pipe.apply( this, jQuery.map( core_slice.call(arguments), promiseAWrapper ) );
 				},
 				// Get a promise for this deferred
 				// If obj is provided, the promise aspect is added to the object
@@ -49,8 +53,31 @@ jQuery.extend({
 			},
 			deferred = {};
 
-		// Keep pipe for back-compat
-		promise.pipe = promise.then;
+		function pipe( /* fnDone, fnFail, fnProgress */ ) {
+			var fns = arguments;
+			return jQuery.Deferred(function( newDefer ) {
+				jQuery.each( tuples, function( i, tuple ) {
+					var action = tuple[ 0 ],
+						fn = fns[ i ];
+					// deferred[ done | fail | progress ] for forwarding actions to newDefer
+					deferred[ tuple[1] ]( jQuery.isFunction( fn ) ?
+						function() {
+							var returned = fn.apply( this, arguments );
+							if ( !attachToPromise(
+								returned,
+								newDefer.resolve,
+								newDefer.reject,
+								newDefer.notify
+							) ) {
+								newDefer[ action + "With" ]( this === deferred ? newDefer : this, [ returned ] );
+							}
+						} :
+						newDefer[ action ]
+					);
+				});
+				fns = null;
+			}).promise();
+		}
 
 		// Add list-specific methods
 		jQuery.each( tuples, function( i, tuple ) {
@@ -94,7 +121,9 @@ jQuery.extend({
 			length = resolveValues.length,
 
 			// the count of uncompleted subordinates
-			remaining = length !== 1 || ( subordinate && jQuery.isFunction( subordinate.promise ) ) ? length : 0,
+			remaining = length !== 1 || subordinate && (
+				jQuery.isFunction( subordinate.promise ) ||
+				jQuery.isFunction( subordinate.then ) ) ? length : 0,
 
 			// the master Deferred. If resolveValues consist of only a single Deferred, just use that.
 			deferred = remaining === 1 ? subordinate : jQuery.Deferred(),
@@ -120,12 +149,12 @@ jQuery.extend({
 			progressContexts = new Array( length );
 			resolveContexts = new Array( length );
 			for ( ; i < length; i++ ) {
-				if ( resolveValues[ i ] && jQuery.isFunction( resolveValues[ i ].promise ) ) {
-					resolveValues[ i ].promise()
-						.done( updateFunc( i, resolveContexts, resolveValues ) )
-						.fail( deferred.reject )
-						.progress( updateFunc( i, progressContexts, progressValues ) );
-				} else {
+				if ( !attachToPromise(
+					resolveValues[ i ],
+					updateFunc( i, resolveContexts, resolveValues ),
+					deferred.reject,
+					updateFunc( i, progressContexts, progressValues )
+				) ) {
 					--remaining;
 				}
 			}
@@ -136,6 +165,6 @@ jQuery.extend({
 			deferred.resolveWith( resolveContexts, resolveValues );
 		}
 
-		return deferred.promise();
+		return deferred.promise ? deferred.promise() : deferred;
 	}
 });
